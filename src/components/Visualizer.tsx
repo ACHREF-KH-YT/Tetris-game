@@ -148,6 +148,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   const [recordingTime, setRecordingTime] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const recordingMixerRef = useRef<GainNode | null>(null);
 
   // References for rendering thread
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -231,8 +232,8 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       filter.connect(gain);
       gain.connect(ctx.destination);
 
-      if (audioDestRef.current) {
-        gain.connect(audioDestRef.current);
+      if (recordingMixerRef.current) {
+        gain.connect(recordingMixerRef.current);
       }
 
       osc1.start();
@@ -307,19 +308,21 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     };
   }, [uploadedMusic.url]);
 
-  // Connect Audio Element to the Canvas Recorder's Audio Destination if active
+  // Connect Audio Element to the Web Audio graph (both speakers and recording mixer)
   useEffect(() => {
-    if (audioDestRef.current && audioElRef.current && !audioSourceRef.current) {
+    if (audioElRef.current && !audioSourceRef.current) {
       try {
         const ctx = getAudioContext();
         audioSourceRef.current = ctx.createMediaElementSource(audioElRef.current);
         audioSourceRef.current.connect(ctx.destination);
-        audioSourceRef.current.connect(audioDestRef.current);
+        if (recordingMixerRef.current) {
+          audioSourceRef.current.connect(recordingMixerRef.current);
+        }
       } catch (err) {
-        console.warn("Routing audio element failed (already connected):", err);
+        console.warn("Routing audio element failed:", err);
       }
     }
-  }, [isRecording, uploadedMusic.url]);
+  }, [uploadedMusic.url]);
 
   // File Upload Handler
   const handleMusicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -347,6 +350,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       audio.loop = true;
       audioElRef.current = audio;
     }
+    audio.crossOrigin = "anonymous";
     audio.src = url;
     audio.volume = musicVolume;
     
@@ -380,6 +384,10 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     if (audioCtxRef.current.state === "suspended") {
       audioCtxRef.current.resume();
     }
+    if (!recordingMixerRef.current && audioCtxRef.current) {
+      recordingMixerRef.current = audioCtxRef.current.createGain();
+      recordingMixerRef.current.gain.value = 1.0;
+    }
     return audioCtxRef.current;
   };
 
@@ -404,8 +412,8 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       gain.connect(ctx.destination);
 
       // If active video recording, feed synth note into MediaRecorder stream
-      if (audioDestRef.current) {
-        gain.connect(audioDestRef.current);
+      if (recordingMixerRef.current) {
+        gain.connect(recordingMixerRef.current);
       }
 
       osc.start();
@@ -415,49 +423,94 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     }
   };
 
-  const startRecording = () => {
+  const startRecording = async () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     try {
       // Initialize AudioContext if not active
       const ctx = getAudioContext();
-      if (!audioDestRef.current) {
-        audioDestRef.current = ctx.createMediaStreamDestination();
+      
+      // Explicitly await the audio context to be fully resumed before proceeding!
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+
+      // Always create a completely fresh MediaStreamDestination node for this recording session
+      audioDestRef.current = ctx.createMediaStreamDestination();
+      
+      // Connect our persistent recording mixer to this destination node
+      if (recordingMixerRef.current) {
+        recordingMixerRef.current.connect(audioDestRef.current);
+      }
+
+      // Ensure that custom uploaded music is correctly connected to both speakers and recording mixer
+      if (audioSourceRef.current && recordingMixerRef.current) {
+        try {
+          audioSourceRef.current.disconnect(recordingMixerRef.current);
+        } catch (e) {}
+        audioSourceRef.current.connect(recordingMixerRef.current);
+      }
+      if (audioSourceRef.current && ctx) {
+        try {
+          audioSourceRef.current.disconnect(ctx.destination);
+        } catch (e) {}
+        audioSourceRef.current.connect(ctx.destination);
+      }
+
+      // Ensure that the music is playing if it is chosen
+      if (bgMusicSource === "uploaded" && audioElRef.current && isMusicPlaying) {
+        audioElRef.current.play().catch(e => console.log("Auto-playing uploaded music during recording:", e));
       }
 
       const chunks: Blob[] = [];
-      const canvasStream = canvas.captureStream(30); // Capture 30fps game screen
-      const combinedStream = new MediaStream();
+      const canvasStream = canvas.captureStream ? canvas.captureStream(30) : (canvas as any).captureStream ? (canvas as any).captureStream(30) : null;
+      if (!canvasStream) throw new Error("Canvas captureStream is not supported in this browser.");
 
-      // Bundle game screen visuals
-      canvasStream.getVideoTracks().forEach((track) => combinedStream.addTrack(track));
-
-      // Bundle retro audio synth notes only if sound is enabled and active
-      if (soundEnabled && audioDestRef.current) {
-        const audioStream = audioDestRef.current.stream;
-        audioStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
-      }
+      // Bundle mixed tracks cleanly using direct array constructor for maximum browser compatibility
+      const audioStream = audioDestRef.current ? audioDestRef.current.stream : null;
+      const tracks = [
+        ...canvasStream.getVideoTracks(),
+        ...(audioStream ? audioStream.getAudioTracks() : [])
+      ];
+      const combinedStream = new MediaStream(tracks);
 
       // Find the best supported container and codecs
-      let options: MediaRecorderOptions = {};
+      // We prioritize video/webm because it is highly optimized for Canvas encoding in modern browsers
       const candidates = [
-        "video/mp4;codecs=avc1,mp4a.40.2",
-        "video/mp4;codecs=h264,aac",
-        "video/mp4",
         "video/webm;codecs=vp9,opus",
         "video/webm;codecs=vp8,opus",
         "video/webm",
+        "video/mp4;codecs=avc1,mp4a.40.2",
+        "video/mp4;codecs=h264,aac",
+        "video/mp4",
       ];
+
+      let recorder: MediaRecorder | null = null;
+      let options: MediaRecorderOptions = {};
 
       for (const mime of candidates) {
         if (MediaRecorder.isTypeSupported(mime)) {
-          options = { mimeType: mime };
-          break;
+          try {
+            options = { mimeType: mime };
+            recorder = new MediaRecorder(combinedStream, options);
+            break;
+          } catch (e) {
+            console.warn(`Browser reported supporting ${mime} but failed to instantiate MediaRecorder:`, e);
+          }
         }
       }
 
-      const recorder = new MediaRecorder(combinedStream, options);
+      // Fallback if none of the candidates with specified mimeType worked
+      if (!recorder) {
+        try {
+          recorder = new MediaRecorder(combinedStream);
+        } catch (e) {
+          console.error("Failed to create MediaRecorder even with default options:", e);
+          throw e;
+        }
+      }
+
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           chunks.push(e.data);
@@ -465,7 +518,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       };
 
       recorder.onstop = () => {
-        const actualMime = recorder.mimeType || "video/webm";
+        const actualMime = recorder ? recorder.mimeType : "video/webm";
         const extension = actualMime.includes("mp4") ? "mp4" : "webm";
         const blob = new Blob(chunks, { type: actualMime });
         const url = URL.createObjectURL(blob);
@@ -490,6 +543,15 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
+    // Clean up connections to prevent memory leaks and track inactivation bugs
+    if (recordingMixerRef.current && audioDestRef.current) {
+      try {
+        recordingMixerRef.current.disconnect(audioDestRef.current);
+      } catch (err) {
+        console.warn("Error disconnecting recording mixer:", err);
+      }
+    }
+    audioDestRef.current = null;
     setIsRecording(false);
   };
 
@@ -905,7 +967,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       ctx.textBaseline = "middle";
       ctx.font = "bold 15px sans-serif";
       ctx.fillStyle = "#ffffff";
-      ctx.fillText("AUTONOMOUS RETRO TETRIS", canvas.width / 2, 28);
+      ctx.fillText("", canvas.width / 2, 28);
 
       // Stats Columns
       const colWidth = canvas.width / 3;
