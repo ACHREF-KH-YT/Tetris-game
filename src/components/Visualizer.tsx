@@ -108,6 +108,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     name: "No track loaded",
   });
   const [musicVolume, setMusicVolume] = useState(0.3);
+  const [isMusicPlaying, setIsMusicPlaying] = useState(true);
+  const [musicCurrentTime, setMusicCurrentTime] = useState(0);
+  const [musicDuration, setMusicDuration] = useState(0);
 
   // Background Theme Rendering Refs
   const starsRef = useRef<{ x: number; y: number; speed: number; size: number }[]>([]);
@@ -264,7 +267,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // Handle playing/pausing of custom MP3/Audio uploads
   useEffect(() => {
     if (audioElRef.current) {
-      if (isPlaying && bgMusicSource === "uploaded" && uploadedMusic.url) {
+      if (isMusicPlaying && bgMusicSource === "uploaded" && uploadedMusic.url) {
         const ctx = getAudioContext();
         if (ctx.state === "suspended") {
           ctx.resume();
@@ -274,7 +277,35 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         audioElRef.current.pause();
       }
     }
-  }, [isPlaying, bgMusicSource, uploadedMusic.url]);
+  }, [isMusicPlaying, bgMusicSource, uploadedMusic.url]);
+
+  // Synchronize custom music current play time & total duration
+  useEffect(() => {
+    const audio = audioElRef.current;
+    if (!audio) return;
+
+    const handleTimeUpdate = () => {
+      setMusicCurrentTime(audio.currentTime);
+    };
+
+    const handleDurationChange = () => {
+      setMusicDuration(audio.duration || 0);
+    };
+
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+    audio.addEventListener("durationchange", handleDurationChange);
+    audio.addEventListener("loadedmetadata", handleDurationChange);
+
+    // Sync initial state
+    setMusicCurrentTime(audio.currentTime);
+    setMusicDuration(audio.duration || 0);
+
+    return () => {
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+      audio.removeEventListener("durationchange", handleDurationChange);
+      audio.removeEventListener("loadedmetadata", handleDurationChange);
+    };
+  }, [uploadedMusic.url]);
 
   // Connect Audio Element to the Canvas Recorder's Audio Destination if active
   useEffect(() => {
@@ -306,19 +337,21 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       name: file.name,
     });
     setBgMusicSource("uploaded");
+    setIsMusicPlaying(true); // Auto-play when uploaded!
 
-    if (audioElRef.current) {
-      audioElRef.current.pause();
+    let audio = audioElRef.current;
+    if (audio) {
+      audio.pause();
     } else {
-      audioElRef.current = new Audio();
-      audioElRef.current.loop = true;
+      audio = new Audio();
+      audio.loop = true;
+      audioElRef.current = audio;
     }
-    audioElRef.current.src = url;
-    audioElRef.current.volume = musicVolume;
+    audio.src = url;
+    audio.volume = musicVolume;
     
-    if (isPlaying) {
-      audioElRef.current.play().catch((err) => console.log("Audio autoplay deferred:", err));
-    }
+    // We can also trigger play if already running
+    audio.play().catch((err) => console.log("Audio autoplay deferred:", err));
   };
 
   // Background Image Upload Handler
@@ -400,19 +433,28 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       // Bundle game screen visuals
       canvasStream.getVideoTracks().forEach((track) => combinedStream.addTrack(track));
 
-      // Bundle retro audio synth notes
-      const audioStream = audioDestRef.current.stream;
-      audioStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
+      // Bundle retro audio synth notes only if sound is enabled and active
+      if (soundEnabled && audioDestRef.current) {
+        const audioStream = audioDestRef.current.stream;
+        audioStream.getAudioTracks().forEach((track) => combinedStream.addTrack(track));
+      }
 
-      let options = { mimeType: "video/webm;codecs=vp9" };
-      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options = { mimeType: "video/webm;codecs=vp8" };
-      }
-      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options = { mimeType: "video/webm" };
-      }
-      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options = { mimeType: "" };
+      // Find the best supported container and codecs
+      let options: MediaRecorderOptions = {};
+      const candidates = [
+        "video/mp4;codecs=avc1,mp4a.40.2",
+        "video/mp4;codecs=h264,aac",
+        "video/mp4",
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm",
+      ];
+
+      for (const mime of candidates) {
+        if (MediaRecorder.isTypeSupported(mime)) {
+          options = { mimeType: mime };
+          break;
+        }
       }
 
       const recorder = new MediaRecorder(combinedStream, options);
@@ -423,11 +465,13 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       };
 
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: "video/webm" });
+        const actualMime = recorder.mimeType || "video/webm";
+        const extension = actualMime.includes("mp4") ? "mp4" : "webm";
+        const blob = new Blob(chunks, { type: actualMime });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `autonomous-tetris-gameplay-score-${score}.webm`;
+        a.download = `autonomous-tetris-gameplay-score-${score}.${extension}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -890,20 +934,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       ctx.fillStyle = "#00f0ff";
       ctx.fillText(blocksPlaced.toString(), colWidth * 2.5, 86);
 
-      // Flashing "● REC" Indicator
-      if (isRecording) {
-        const isDotVisible = Math.floor(Date.now() / 500) % 2 === 0;
-        if (isDotVisible) {
-          ctx.beginPath();
-          ctx.arc(38, 28, 4.5, 0, Math.PI * 2);
-          ctx.fillStyle = "#ff3333";
-          ctx.fill();
-        }
-        ctx.font = "bold 10px monospace";
-        ctx.fillStyle = "#ff3333";
-        ctx.textAlign = "left";
-        ctx.fillText("REC", 48, 28);
-      }
+
 
       // --- Background Theme Renderer ---
       ctx.save();
@@ -1480,7 +1511,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
 
                 {/* Upload MP3 Panel */}
                 {bgMusicSource === "uploaded" && (
-                  <div className="space-y-2 pt-1">
+                  <div className="space-y-3 pt-1">
                     <div className="flex items-center justify-between">
                       <span className="text-[9px] uppercase tracking-wider text-gray-500">Upload Custom MP3 File</span>
                       {uploadedMusic.file && <span className="text-[9px] text-emerald-400 font-mono">Loaded ✓</span>}
@@ -1498,6 +1529,51 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                         className="hidden"
                       />
                     </label>
+
+                    {/* Dedicated Music Control Panel when file is loaded */}
+                    {uploadedMusic.url && (
+                      <div className="bg-[#0a0a0a] border border-white/5 rounded p-2.5 mt-2 space-y-2">
+                        {/* Title and Controls */}
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-gray-400 font-medium truncate max-w-[150px]">
+                            {uploadedMusic.name}
+                          </span>
+                          <button
+                            onClick={() => setIsMusicPlaying(!isMusicPlaying)}
+                            className="p-1.5 rounded-full bg-orange-600 hover:bg-orange-500 active:scale-95 text-white transition-all flex items-center justify-center"
+                            title={isMusicPlaying ? "Pause Music" : "Play Music"}
+                          >
+                            {isMusicPlaying ? (
+                              <Pause className="w-3 h-3 fill-current" />
+                            ) : (
+                              <Play className="w-3 h-3 fill-current ml-0.5" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Music Time Seek Timeline */}
+                        <div className="space-y-1">
+                          <input
+                            type="range"
+                            min="0"
+                            max={musicDuration || 100}
+                            value={musicCurrentTime}
+                            onChange={(e) => {
+                              const newTime = Number(e.target.value);
+                              if (audioElRef.current) {
+                                audioElRef.current.currentTime = newTime;
+                                setMusicCurrentTime(newTime);
+                              }
+                            }}
+                            className="w-full accent-orange-500 cursor-pointer h-1 bg-zinc-800 rounded appearance-none"
+                          />
+                          <div className="flex justify-between text-[9px] text-gray-500 font-mono">
+                            <span>{formatTime(Math.floor(musicCurrentTime))}</span>
+                            <span>{formatTime(Math.floor(musicDuration))}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
