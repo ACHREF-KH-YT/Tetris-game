@@ -1,0 +1,6 @@
+{
+  "name": "Autonomous Retro Tetris Video Generator",
+  "description": "An interactive chiptune visualizer that simulates a smart Tetris autopilot gameplay loop, syncing block placement to the legendary Korobeiniki chiptune melody and compiling custom 8-bit MP4 videos via a Python background pipeline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
