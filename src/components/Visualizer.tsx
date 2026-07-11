@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { InstrumentType, GameStatus } from "../types";
 import { NOTE_FREQS, TETRIS_MELODY } from "../data";
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Radio, Trophy, Zap, Award, Video } from "lucide-react";
+import { Play, Pause, RotateCcw, Volume2, VolumeX, Radio, Trophy, Zap, Award, Video, Music, Palette, Info, Sliders, Upload, Check } from "lucide-react";
 
 // Board rendering coordinates & grid spacing
 const BOARD_W = 380;
@@ -92,6 +92,46 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   const [isPlaying, setIsPlaying] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   
+  // Custom Customizer Settings
+  const [bgTheme, setBgTheme] = useState<"slate" | "neon" | "space" | "sunset" | "matrix" | "custom">("neon");
+  const [customBgImage, setCustomBgImage] = useState<HTMLImageElement | null>(null);
+  const [customBgName, setCustomBgName] = useState<string>("No image loaded");
+  const [chiptuneEnabled, setChiptuneEnabled] = useState(true);
+  const [bgMusicSource, setBgMusicSource] = useState<"none" | "procedural" | "uploaded">("procedural");
+  const [uploadedMusic, setUploadedMusic] = useState<{
+    file: File | null;
+    url: string | null;
+    name: string;
+  }>({
+    file: null,
+    url: null,
+    name: "No track loaded",
+  });
+  const [musicVolume, setMusicVolume] = useState(0.3);
+
+  // Background Theme Rendering Refs
+  const starsRef = useRef<{ x: number; y: number; speed: number; size: number }[]>([]);
+  const matrixColumnsRef = useRef<number[]>([]);
+
+  // HTML5 Audio Elements for MP3 Background Loop
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+
+  // Initialize background elements
+  if (starsRef.current.length === 0) {
+    for (let i = 0; i < 40; i++) {
+      starsRef.current.push({
+        x: BX + Math.random() * BOARD_W,
+        y: BY + Math.random() * BOARD_H,
+        speed: Math.random() * 0.4 + 0.1,
+        size: Math.random() * 1.5 + 0.5,
+      });
+    }
+  }
+  if (matrixColumnsRef.current.length === 0) {
+    matrixColumnsRef.current = Array.from({ length: 15 }, () => BY + Math.random() * BOARD_H);
+  }
+  
   // Game Stats
   const [score, setScore] = useState(0);
   const [lines, setLines] = useState(0);
@@ -149,6 +189,156 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
+  // --- Background Music Procedural Synthesizer ---
+  const playAmbientPad = () => {
+    if (!soundEnabled) return;
+    try {
+      const ctx = getAudioContext();
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+
+      osc1.type = "sine";
+      osc2.type = "triangle";
+      
+      // Retro synthwave ambient chord progressions: Cmaj7 -> Am7 -> Fmaj7 -> G7
+      const chords = [
+        [130.81, 164.81, 196.00], // C3, E3, G3
+        [110.00, 130.81, 164.81], // A2, C3, E3
+        [174.61, 220.00, 261.63], // F3, A3, C4
+        [196.00, 246.94, 293.66], // G3, B3, D4
+      ];
+      
+      const currentChord = chords[Math.floor(Date.now() / 6000) % chords.length];
+      osc1.frequency.setValueAtTime(currentChord[0], ctx.currentTime);
+      osc2.frequency.setValueAtTime(currentChord[1] * 2, ctx.currentTime); // 1 Octave up
+
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(280, ctx.currentTime); // Nice warm low-pass cut
+
+      // Fade-in & Fade-out envelope
+      gain.gain.setValueAtTime(0, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(musicVolume * 0.15, ctx.currentTime + 1.5);
+      gain.gain.setValueAtTime(musicVolume * 0.15, ctx.currentTime + 4.5);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 6.0);
+
+      osc1.connect(filter);
+      osc2.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+
+      if (audioDestRef.current) {
+        gain.connect(audioDestRef.current);
+      }
+
+      osc1.start();
+      osc2.start();
+      
+      osc1.stop(ctx.currentTime + 6.0);
+      osc2.stop(ctx.currentTime + 6.0);
+    } catch (e) {
+      console.warn("Ambient pad audio error:", e);
+    }
+  };
+
+  // Trigger procedural ambient soundscapes periodically
+  useEffect(() => {
+    let padInterval: NodeJS.Timeout | null = null;
+    if (isPlaying && soundEnabled && bgMusicSource === "procedural") {
+      playAmbientPad();
+      padInterval = setInterval(playAmbientPad, 6000);
+    }
+    return () => {
+      if (padInterval) clearInterval(padInterval);
+    };
+  }, [isPlaying, soundEnabled, bgMusicSource, musicVolume]);
+
+  // Sync volume of HTML5 Audio element
+  useEffect(() => {
+    if (audioElRef.current) {
+      audioElRef.current.volume = musicVolume;
+    }
+  }, [musicVolume]);
+
+  // Handle playing/pausing of custom MP3/Audio uploads
+  useEffect(() => {
+    if (audioElRef.current) {
+      if (isPlaying && bgMusicSource === "uploaded" && uploadedMusic.url) {
+        const ctx = getAudioContext();
+        if (ctx.state === "suspended") {
+          ctx.resume();
+        }
+        audioElRef.current.play().catch((err) => console.log("Audio play deferred or blocked by browser policies:", err));
+      } else {
+        audioElRef.current.pause();
+      }
+    }
+  }, [isPlaying, bgMusicSource, uploadedMusic.url]);
+
+  // Connect Audio Element to the Canvas Recorder's Audio Destination if active
+  useEffect(() => {
+    if (audioDestRef.current && audioElRef.current && !audioSourceRef.current) {
+      try {
+        const ctx = getAudioContext();
+        audioSourceRef.current = ctx.createMediaElementSource(audioElRef.current);
+        audioSourceRef.current.connect(ctx.destination);
+        audioSourceRef.current.connect(audioDestRef.current);
+      } catch (err) {
+        console.warn("Routing audio element failed (already connected):", err);
+      }
+    }
+  }, [isRecording, uploadedMusic.url]);
+
+  // File Upload Handler
+  const handleMusicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (uploadedMusic.url) {
+      URL.revokeObjectURL(uploadedMusic.url);
+    }
+
+    const url = URL.createObjectURL(file);
+    setUploadedMusic({
+      file,
+      url,
+      name: file.name,
+    });
+    setBgMusicSource("uploaded");
+
+    if (audioElRef.current) {
+      audioElRef.current.pause();
+    } else {
+      audioElRef.current = new Audio();
+      audioElRef.current.loop = true;
+    }
+    audioElRef.current.src = url;
+    audioElRef.current.volume = musicVolume;
+    
+    if (isPlaying) {
+      audioElRef.current.play().catch((err) => console.log("Audio autoplay deferred:", err));
+    }
+  };
+
+  // Background Image Upload Handler
+  const handleBgImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      setCustomBgImage(img);
+      setCustomBgName(file.name);
+      setBgTheme("custom");
+    };
+    img.onerror = () => {
+      console.error("Failed to load background image");
+    };
+    img.src = url;
+  };
+
   // Sound Engine
   const getAudioContext = (): AudioContext => {
     if (!audioCtxRef.current) {
@@ -161,7 +351,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   };
 
   const triggerAudioNote = (noteName: string, lengthMultiplier = 1.0) => {
-    if (!soundEnabled) return;
+    if (!soundEnabled || !chiptuneEnabled) return;
     try {
       const ctx = getAudioContext();
       const osc = ctx.createOscillator();
@@ -715,6 +905,162 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         ctx.fillText("REC", 48, 28);
       }
 
+      // --- Background Theme Renderer ---
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(BX, BY, BOARD_W, BOARD_H);
+      ctx.clip();
+
+      if (bgTheme === "slate") {
+        ctx.fillStyle = "#09090b";
+        ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+      } 
+      else if (bgTheme === "neon") {
+        ctx.fillStyle = "#050010";
+        ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+        
+        // draw perspective grid lines from a virtual horizon point at the top center
+        const horizonY = BY + 30;
+        const horizonX = BX + BOARD_W / 2;
+        
+        // perspective lines
+        ctx.strokeStyle = "rgba(0, 240, 255, 0.25)";
+        ctx.lineWidth = 1.5;
+        for (let x = -10; x <= 20; x += 3) {
+          ctx.beginPath();
+          ctx.moveTo(horizonX + x * 10, horizonY);
+          ctx.lineTo(BX + (x - 5) * 50, BY + BOARD_H);
+          ctx.stroke();
+        }
+
+        // horizontal lines scrolling down
+        const gridSpeed = (Date.now() * 0.05) % 40;
+        ctx.strokeStyle = "rgba(255, 0, 128, 0.3)";
+        for (let i = 0; i < 15; i++) {
+          const progress = (i * 25 + gridSpeed) / 400; // between 0 and 1
+          const y = horizonY + progress * progress * (BOARD_H - 30);
+          if (y >= BY && y <= BY + BOARD_H) {
+            ctx.beginPath();
+            ctx.moveTo(BX, y);
+            ctx.lineTo(BX + BOARD_W, y);
+            ctx.stroke();
+          }
+        }
+      } 
+      else if (bgTheme === "space") {
+        const gradient = ctx.createLinearGradient(BX, BY, BX, BY + BOARD_H);
+        gradient.addColorStop(0, "#0c0120");
+        gradient.addColorStop(0.5, "#04010f");
+        gradient.addColorStop(1, "#000000");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+
+        // Update & Draw starfield particles inside playfield
+        starsRef.current.forEach((star) => {
+          star.y += star.speed;
+          if (star.y > BY + BOARD_H) {
+            star.y = BY;
+            star.x = BX + Math.random() * BOARD_W;
+          }
+          
+          const alpha = 0.3 + Math.sin(Date.now() * 0.003 + star.x) * 0.4;
+          ctx.fillStyle = `rgba(255, 255, 255, ${Math.max(0.1, alpha)})`;
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      } 
+      else if (bgTheme === "sunset") {
+        const gradient = ctx.createLinearGradient(BX, BY, BX, BY + BOARD_H);
+        gradient.addColorStop(0, "#1f0318");
+        gradient.addColorStop(0.6, "#4a053c");
+        gradient.addColorStop(1, "#7d0e3a");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+
+        const sunX = BX + BOARD_W / 2;
+        const sunY = BY + BOARD_H / 2 + 50;
+        const sunRadius = 90;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, sunRadius, 0, Math.PI * 2);
+        ctx.clip();
+
+        const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, sunRadius);
+        sunGlow.addColorStop(0, "#ffe600");
+        sunGlow.addColorStop(0.4, "#ff5500");
+        sunGlow.addColorStop(1, "#ff0077");
+        ctx.fillStyle = sunGlow;
+        ctx.fillRect(sunX - sunRadius, sunY - sunRadius, sunRadius * 2, sunRadius * 2);
+
+        ctx.fillStyle = "rgba(74, 5, 60, 0.95)";
+        for (let sy = sunY - sunRadius; sy < sunY + sunRadius; sy += 12) {
+          const relativeY = (sy - (sunY - sunRadius)) / (sunRadius * 2);
+          const barHeight = relativeY * 6;
+          ctx.fillRect(sunX - sunRadius, sy, sunRadius * 2, barHeight);
+        }
+        ctx.restore();
+      } 
+      else if (bgTheme === "matrix") {
+        ctx.fillStyle = "#010802";
+        ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+
+        ctx.font = "9px monospace";
+        matrixColumnsRef.current.forEach((y, colIdx) => {
+          const colX = BX + colIdx * (BOARD_W / matrixColumnsRef.current.length);
+          const characters = "0101XYZTETRISあぃいぅうぇえぉおかがきぎくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむめもやゆよらりるれろわをん";
+          
+          for (let i = 0; i < 8; i++) {
+            const charY = y - i * 14;
+            if (charY >= BY && charY <= BY + BOARD_H) {
+              const char = characters[Math.floor((charY + colIdx * 20) % characters.length)];
+              const alpha = 1.0 - i * 0.12;
+              ctx.fillStyle = i === 0 ? `rgba(180, 255, 180, ${alpha})` : `rgba(0, 240, 50, ${alpha})`;
+              ctx.fillText(char, colX + 4, charY);
+            }
+          }
+
+          matrixColumnsRef.current[colIdx] += 1.8 + Math.sin(colIdx + Date.now() * 0.001) * 0.8;
+          if (matrixColumnsRef.current[colIdx] > BY + BOARD_H + 100) {
+            matrixColumnsRef.current[colIdx] = BY - Math.random() * 80;
+          }
+        });
+      }
+      else if (bgTheme === "custom") {
+        if (customBgImage) {
+          const imgRatio = customBgImage.width / customBgImage.height;
+          const boardRatio = BOARD_W / BOARD_H;
+          let drawW = BOARD_W;
+          let drawH = BOARD_H;
+          let drawX = BX;
+          let drawY = BY;
+
+          if (imgRatio > boardRatio) {
+            drawW = BOARD_H * imgRatio;
+            drawX = BX - (drawW - BOARD_W) / 2;
+          } else {
+            drawH = BOARD_W / imgRatio;
+            drawY = BY - (drawH - BOARD_H) / 2;
+          }
+
+          ctx.drawImage(customBgImage, drawX, drawY, drawW, drawH);
+          
+          // Subtle dark overlay to ensure piece contrast
+          ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+          ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+        } else {
+          ctx.fillStyle = "#0c0c0e";
+          ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
+          ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
+          ctx.font = "bold 12px sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("PLEASE UPLOAD IMAGE BELOW", BX + BOARD_W / 2, BY + BOARD_H / 2);
+        }
+      }
+
+      ctx.restore();
+
       // 1. Grid Background lines
       ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
       ctx.lineWidth = 1;
@@ -895,7 +1241,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return () => {
       if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current);
     };
-  }, [isPlaying, gameStatus, ballCount, ballSpeed, instrument, gravity, restitution, preset, score, lines, blocksPlaced, isRecording, recordingTime]);
+  }, [isPlaying, gameStatus, ballCount, ballSpeed, instrument, gravity, restitution, preset, score, lines, blocksPlaced, isRecording, recordingTime, bgTheme, customBgImage]);
 
   return (
     <div className="bg-[#0c0c0c] border border-white/10 rounded-xl p-5 flex flex-col items-center justify-between shadow-2xl h-full relative overflow-hidden">
@@ -989,6 +1335,202 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             </>
           )}
         </button>
+      </div>
+
+      {/* Dynamic Sandbox Laboratory: Background, Music, Chiptune Configuration */}
+      <div className="w-full mt-6 pt-5 border-t border-white/5 space-y-6 z-10 text-left">
+        <div className="flex items-center space-x-2 text-gray-400 pb-1.5 border-b border-white/5">
+          <Sliders className="w-4 h-4 text-orange-500 animate-pulse" />
+          <h4 className="text-[10px] font-bold uppercase tracking-[0.2em]">Game Customization Laboratory</h4>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Section A: Background Theme */}
+          <div className="space-y-3">
+            <div className="flex items-center space-x-2">
+              <Palette className="w-3.5 h-3.5 text-cyan-400" />
+              <label className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Game Board Background</label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: "slate", label: "Retro Slate", color: "bg-[#09090b] border-zinc-700" },
+                { id: "neon", label: "Cyber Grid", color: "bg-[#050010] border-pink-500/50" },
+                { id: "space", label: "Cosmic Stars", color: "bg-[#0c0120] border-indigo-500/50" },
+                { id: "sunset", label: "Sunset Glow", color: "bg-[#4a053c] border-orange-500/50" },
+                { id: "matrix", label: "Matrix Code", color: "bg-[#010802] border-emerald-500/50" },
+                { id: "custom", label: "Custom Image", color: "bg-[#1c1917] border-orange-500" },
+              ].map((theme) => (
+                <button
+                  key={theme.id}
+                  onClick={() => setBgTheme(theme.id as any)}
+                  className={`flex items-center justify-between p-2 rounded text-left border transition-all text-[11px] font-medium active:scale-95 ${
+                    bgTheme === theme.id
+                      ? "bg-white/10 border-orange-500 text-white shadow shadow-orange-500/20"
+                      : "bg-[#161616]/40 border-white/5 text-gray-400 hover:bg-[#222]/40 hover:text-white"
+                  }`}
+                >
+                  <span className="flex items-center space-x-2">
+                    <span className={`w-2 h-2 rounded-full ${theme.color}`} />
+                    <span>{theme.label}</span>
+                  </span>
+                  {bgTheme === theme.id && <Check className="w-3 h-3 text-orange-500" />}
+                </button>
+              ))}
+            </div>
+
+            {bgTheme === "custom" && (
+              <div className="space-y-2 pt-2 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] uppercase tracking-wider text-gray-500">Upload Background Image</span>
+                  {customBgImage && <span className="text-[9px] text-emerald-400 font-mono">Loaded ✓</span>}
+                </div>
+                
+                <label className="flex items-center justify-center space-x-2 px-3 py-2.5 bg-[#161616]/60 border border-white/10 hover:border-orange-500/30 rounded cursor-pointer transition-colors group">
+                  <Upload className="w-3.5 h-3.5 text-gray-400 group-hover:text-orange-400 transition-colors" />
+                  <span className="text-[11px] text-gray-300 group-hover:text-white transition-colors truncate max-w-[200px]">
+                    {customBgImage ? customBgName : "Select custom image..."}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleBgImageUpload}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Section B: Audio & Music System */}
+          <div className="space-y-4">
+            {/* Chiptune Instrument Toggle */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between p-2.5 rounded bg-[#161616]/40 border border-white/5">
+                <div className="flex items-center space-x-2.5">
+                  <div className={`p-1 rounded ${chiptuneEnabled ? "bg-orange-500/10 text-orange-500" : "bg-zinc-800 text-zinc-500"}`}>
+                    <Radio className="w-3.5 h-3.5" />
+                  </div>
+                  <div className="flex flex-col text-left">
+                    <span className="text-[11px] font-semibold text-white">Chiptune Synthesizers</span>
+                    <span className="text-[9px] text-gray-500">Play 8-bit sound effects on landings</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setChiptuneEnabled(!chiptuneEnabled)}
+                  className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors focus:outline-none ${
+                    chiptuneEnabled ? "bg-orange-600" : "bg-neutral-800"
+                  }`}
+                >
+                  <div
+                    className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${
+                      chiptuneEnabled ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Background MP3 Music */}
+            <div className="space-y-2">
+              <div className="flex items-center space-x-2">
+                <Music className="w-3.5 h-3.5 text-orange-500" />
+                <label className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Background Music Soundtrack</label>
+              </div>
+              
+              <div className="space-y-2 bg-[#161616]/40 border border-white/5 rounded p-3">
+                {/* Select Music Source */}
+                <div className="grid grid-cols-3 gap-1.5 pb-2.5 border-b border-white/5">
+                  <button
+                    onClick={() => setBgMusicSource("none")}
+                    className={`px-1.5 py-1.5 rounded text-[10px] font-medium transition-all ${
+                      bgMusicSource === "none"
+                        ? "bg-orange-600 text-white"
+                        : "bg-[#0c0c0c] text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Mute Music
+                  </button>
+                  <button
+                    onClick={() => {
+                      setBgMusicSource("procedural");
+                      getAudioContext();
+                    }}
+                    className={`px-1.5 py-1.5 rounded text-[10px] font-medium transition-all ${
+                      bgMusicSource === "procedural"
+                        ? "bg-orange-600 text-white"
+                        : "bg-[#0c0c0c] text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Procedural Synth
+                  </button>
+                  <button
+                    onClick={() => {
+                      setBgMusicSource("uploaded");
+                      getAudioContext();
+                    }}
+                    className={`px-1.5 py-1.5 rounded text-[10px] font-medium transition-all ${
+                      bgMusicSource === "uploaded"
+                        ? "bg-orange-600 text-white"
+                        : "bg-[#0c0c0c] text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Custom MP3
+                  </button>
+                </div>
+
+                {/* Upload MP3 Panel */}
+                {bgMusicSource === "uploaded" && (
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] uppercase tracking-wider text-gray-500">Upload Custom MP3 File</span>
+                      {uploadedMusic.file && <span className="text-[9px] text-emerald-400 font-mono">Loaded ✓</span>}
+                    </div>
+                    
+                    <label className="flex items-center justify-center space-x-2 px-3 py-2 bg-[#0c0c0c] border border-white/10 hover:border-orange-500/30 rounded cursor-pointer transition-colors group">
+                      <Upload className="w-3.5 h-3.5 text-gray-400 group-hover:text-orange-400 transition-colors" />
+                      <span className="text-[11px] text-gray-300 group-hover:text-white transition-colors truncate max-w-[200px]">
+                        {uploadedMusic.file ? uploadedMusic.name : "Select MP3 track..."}
+                      </span>
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        onChange={handleMusicUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {/* Procedural Track Info */}
+                {bgMusicSource === "procedural" && (
+                  <div className="text-[10px] text-gray-500 italic flex items-start gap-1.5 pt-1">
+                    <Info className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+                    <span>Generates dynamic synthwave ambient chords in real-time, procedurally synthesized inside your browser!</span>
+                  </div>
+                )}
+
+                {/* Volume Slider */}
+                {bgMusicSource !== "none" && (
+                  <div className="space-y-1.5 pt-2 border-t border-white/5">
+                    <div className="flex justify-between text-[9px] uppercase tracking-wider text-gray-500">
+                      <span>Soundtrack Volume</span>
+                      <span className="font-mono">{Math.round(musicVolume * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={musicVolume}
+                      onChange={(e) => setMusicVolume(Number(e.target.value))}
+                      className="w-full accent-orange-500 cursor-pointer h-1 bg-[#0c0c0c] rounded appearance-none"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
