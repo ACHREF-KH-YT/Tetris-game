@@ -95,6 +95,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // Custom Customizer Settings
   const [bgTheme, setBgTheme] = useState<"slate" | "neon" | "space" | "sunset" | "matrix" | "custom">("neon");
   const [customBgImage, setCustomBgImage] = useState<HTMLImageElement | null>(null);
+  const [customBgUrl, setCustomBgUrl] = useState<string | null>(null);
   const [customBgName, setCustomBgName] = useState<string>("No image loaded");
   const [chiptuneEnabled, setChiptuneEnabled] = useState(true);
   const [bgMusicSource, setBgMusicSource] = useState<"none" | "procedural" | "uploaded">("procedural");
@@ -363,10 +364,15 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (customBgUrl) {
+      URL.revokeObjectURL(customBgUrl);
+    }
+
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       setCustomBgImage(img);
+      setCustomBgUrl(url);
       setCustomBgName(file.name);
       setBgTheme("custom");
     };
@@ -947,11 +953,40 @@ export const Visualizer: React.FC<VisualizerProps> = ({
 
     // Draw thread
     const draw = () => {
-      ctx.fillStyle = "#050505";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (bgTheme === "custom" && customBgImage) {
+        // Draw custom background image covering the ENTIRE canvas!
+        const imgRatio = customBgImage.width / customBgImage.height;
+        const canvasRatio = canvas.width / canvas.height;
+        let drawW = canvas.width;
+        let drawH = canvas.height;
+        let drawX = 0;
+        let drawY = 0;
+
+        if (imgRatio > canvasRatio) {
+          drawW = canvas.height * imgRatio;
+          drawX = -(drawW - canvas.width) / 2;
+        } else {
+          drawH = canvas.width / imgRatio;
+          drawY = -(drawH - canvas.height) / 2;
+        }
+
+        ctx.drawImage(customBgImage, drawX, drawY, drawW, drawH);
+
+        // Very subtle dark overlay over the entire image so text remains super clear
+        ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.fillStyle = "#050505";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
 
       // --- Canvas Retro Header HUD ---
-      ctx.fillStyle = "#0c0c0c";
+      if (bgTheme === "custom" && customBgImage) {
+        // Transparent header in custom mode so image is visible behind stats
+        ctx.fillStyle = "rgba(12, 12, 12, 0.4)";
+      } else {
+        ctx.fillStyle = "#0c0c0c";
+      }
       ctx.fillRect(0, 0, canvas.width, BY - 15);
 
       // Neon orange border separator under HUD
@@ -1122,25 +1157,10 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       }
       else if (bgTheme === "custom") {
         if (customBgImage) {
-          const imgRatio = customBgImage.width / customBgImage.height;
-          const boardRatio = BOARD_W / BOARD_H;
-          let drawW = BOARD_W;
-          let drawH = BOARD_H;
-          let drawX = BX;
-          let drawY = BY;
-
-          if (imgRatio > boardRatio) {
-            drawW = BOARD_H * imgRatio;
-            drawX = BX - (drawW - BOARD_W) / 2;
-          } else {
-            drawH = BOARD_W / imgRatio;
-            drawY = BY - (drawH - BOARD_H) / 2;
-          }
-
-          ctx.drawImage(customBgImage, drawX, drawY, drawW, drawH);
-          
-          // Subtle dark overlay to ensure piece contrast
-          ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+          // The background image already covers the entire canvas beautifully.
+          // We apply a very subtle, elegant dark overlay only inside the play board area
+          // to make the vibrant neon blocks perfectly readable against any photo background.
+          ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
           ctx.fillRect(BX, BY, BOARD_W, BOARD_H);
         } else {
           ctx.fillStyle = "#0c0c0e";
@@ -1334,10 +1354,10 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return () => {
       if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current);
     };
-  }, [isPlaying, gameStatus, ballCount, ballSpeed, instrument, gravity, restitution, preset, score, lines, blocksPlaced, isRecording, recordingTime, bgTheme, customBgImage]);
+  }, [isPlaying, gameStatus, ballCount, ballSpeed, instrument, gravity, restitution, preset, score, lines, blocksPlaced, isRecording, recordingTime, bgTheme, customBgImage, customBgUrl]);
 
   return (
-    <div className="bg-[#0c0c0c] border border-white/10 rounded-xl p-5 flex flex-col items-center justify-between shadow-2xl h-full relative overflow-hidden">
+    <div className="bg-[#0c0c0c] border border-white/10 rounded-xl p-5 flex flex-col items-center justify-between shadow-2xl h-full relative overflow-hidden transition-all duration-500">
       {/* Background neon ambient light */}
       <div className="absolute top-[-100px] left-[-100px] w-56 h-56 bg-orange-500/5 blur-3xl rounded-full pointer-events-none" />
       <div className="absolute bottom-[-100px] right-[-100px] w-56 h-56 bg-orange-900/5 blur-3xl rounded-full pointer-events-none" />
@@ -1359,7 +1379,12 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       </div>
 
       {/* Responsive Canvas Container */}
-      <div className="my-5 flex items-center justify-center bg-[#050505] rounded-lg overflow-hidden border border-white/5 p-2 shadow-inner w-full relative">
+      <div 
+        className="my-5 flex items-center justify-center rounded-lg overflow-hidden border border-white/5 p-2 shadow-inner w-full relative transition-all duration-500"
+        style={{
+          backgroundColor: bgTheme === "custom" && customBgUrl ? "transparent" : "#050505",
+        }}
+      >
         <canvas
           ref={canvasRef}
           width={480}
